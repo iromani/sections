@@ -1,2 +1,2 @@
-# section2
-CS237A Lab Section 2
+# CS237A Lab Sections
+Code for CS237A Lab Sections
