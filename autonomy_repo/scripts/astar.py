@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from utils import plot_line_segments
+from matplotlib.colors import ListedColormap, BoundaryNorm
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
@@ -93,12 +94,12 @@ class AStar(object):
         Input:
             x: tuple state
         Output:
-            A tuple that represents the closest point to x on the discrete state grid
+            An array that represents the closest point to x on the discrete state grid
         """
-        return (
+        return np.array((
             self.resolution * round((x[0] - self.x_offset[0]) / self.resolution) + self.x_offset[0],
             self.resolution * round((x[1] - self.x_offset[1]) / self.resolution) + self.x_offset[1],
-        )
+        ))
 
     def get_neighbors(self, x, obstacle_margin=0.1):
         """
@@ -121,7 +122,7 @@ class AStar(object):
             self.snap_to_grid((x[0]-self.resolution,x[1])),
             self.snap_to_grid((x[0]-self.resolution,x[1]+self.resolution))
         ]
-        return [n for n in all_neighs if self.is_free(n,obstacle_margin)]
+        return [n for n in all_neighs if self.occupancy.is_free(n)]
 
 
 
@@ -139,10 +140,9 @@ class AStar(object):
         Output:
             A list of tuples, which is a list of the states that go from start to goal
         """
-        path = [self.x_goal]
+        path = [tuple(self.x_goal)]
         current = path[0]
         while current != self.x_init:
-            self.logger.warn(f"reconstruct_path: current: {current}")
             path.insert(0,self.came_from[current])
             current = path[0]
         self.logger.warn(f"reconstruct_path returning with length {len(path)}")   
@@ -168,11 +168,11 @@ class AStar(object):
     def plot_tree(self, point_size=15):
         plot_line_segments([(x, self.came_from[x]) for x in self.open_set if x != self.x_init], linewidth=1, color="blue", alpha=0.2)
         plot_line_segments([(x, self.came_from[x]) for x in self.closed_set if x != self.x_init], linewidth=1, color="blue", alpha=0.2)
-        px = [x[0] for x in self.open_set | self.closed_set if x != self.x_init and x != self.x_goal]
-        py = [x[1] for x in self.open_set | self.closed_set if x != self.x_init and x != self.x_goal]
+        px = [x[0] for x in self.open_set | self.closed_set if x != self.x_init and x != tuple(self.x_goal)]
+        py = [x[1] for x in self.open_set | self.closed_set if x != self.x_init and x != tuple(self.x_goal)]
         plt.scatter(px, py, color="blue", s=point_size, zorder=10, alpha=0.2)
 
-    def solve(self,obstacle_margin=0.1):
+    def solve(self,call_no,obstacle_margin=0.05):
         """
         Solves the planning problem using the A* search algorithm. It places
         the solution as a list of tuples (each representing a state) that go
@@ -182,32 +182,53 @@ class AStar(object):
         Output:
             Boolean, True if a solution from x_init to x_goal was found
         """
-        if not self.is_free(self.x_goal,obstacle_margin):
-            self.logger.warn(f"DEBUG: astar.solve: Goal is occupied, search will return False")
+        if not self.occupancy.is_free(self.x_goal):
+            self.logger.warn(f"DEBUG: astar.solve: Goal is occupied {self.x_goal}, search will return False")
             return False
         visit_count = 0
+        self.logger.warn(f"DEBUG: open_set={self.open_set}, call_no={call_no}")
+        # Plot Stochastic Occupancy grid with frontier to explore
+        fig,ax = plt.subplots(1)
+        cmap = ListedColormap(['purple', 'green', 'yellow'])
+        bounds = [-1.0, 0.0, 0.5, 1.0]   # boundaries between bins
+        norm = BoundaryNorm(bounds, cmap.N, clip=True)
+        ax.imshow(self.occupancy.probs, origin='lower',cmap=cmap,norm=norm)
+        x_curr = self.snap_to_grid(self.find_best_est_cost_through())
+        x_grid = self.occupancy.state2grid(x_curr)
+        ax.plot(x_grid[0], x_grid[1], 'r*')
+        x_goal_grid = self.snap_to_grid(self.x_goal)
+        ax.plot(x_goal_grid[0], x_goal_grid[1], 'r^')
+        #ax.plot(frontier_states[:,0], frontier_states[:,1], 'b+')
+        ax.set_ylabel('y')
+        ax.set_xlabel('x')
+        plt.savefig(f"occ_{call_no:03d}.png")
         while len(self.open_set) > 0:
             visit_count += 1
             #self.logger.warn(f"astar.solve() visit {visit_count}")
             x_curr = self.snap_to_grid(self.find_best_est_cost_through())
-            if x_curr == self.x_goal:
+            if np.all(x_curr == self.x_goal):
                 self.logger.warn(f"astar.solve() Returning True after {visit_count} visits")
                 self.path = self.reconstruct_path()
                 return True
-            self.open_set.remove(x_curr)
-            self.closed_set.add(x_curr)
-            for x_neigh in self.get_neighbors(x_curr,obstacle_margin):
-                if x_neigh in self.closed_set:
+            x_t = tuple(x_curr) # x_curr[0],x_curr[1])
+            self.open_set.remove(x_t)
+            self.closed_set.add(x_t)
+            if visit_count == 1:
+                self.logger.warn(f"DEBUG: x_t={x_t}, len(neighbors)={len(self.get_neighbors(x_t,obstacle_margin))}")
+                self.logger.warn(f"DEBUG: is_free(x_t)={self.occupancy.is_free(np.array(x_t))}")
+            for x_neigh in self.get_neighbors(x_t,obstacle_margin):
+                x_n = tuple(x_neigh)
+                if x_n in self.closed_set:
                     continue
-                tentative_cost_to_arrive = self.cost_to_arrive[x_curr] + self.distance(x_curr,x_neigh)
+                tentative_cost_to_arrive = self.cost_to_arrive[x_t] + self.distance(x_t,x_n)
                 #self.logger.warn(f"astar.solve() tentative_cost_to_arrive = {tentative_cost_to_arrive}")
-                if x_neigh not in self.open_set:
-                    self.open_set.add(x_neigh)
-                elif tentative_cost_to_arrive > self.cost_to_arrive[x_neigh]:
+                if x_n not in self.open_set:
+                    self.open_set.add(x_n)
+                elif tentative_cost_to_arrive > self.cost_to_arrive[x_n]:
                     continue
-                self.came_from[x_neigh] = x_curr
-                self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
-                self.est_cost_through[x_neigh] = tentative_cost_to_arrive + self.distance(x_neigh,self.x_goal)
+                self.came_from[x_n] = x_t
+                self.cost_to_arrive[x_n] = tentative_cost_to_arrive
+                self.est_cost_through[x_n] = tentative_cost_to_arrive + self.distance(x_n,self.x_goal)
         self.logger.warn(f"astar.solve() Returning False after {visit_count} visits")
         return False
             
